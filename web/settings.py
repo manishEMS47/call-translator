@@ -15,6 +15,7 @@ CMD_PORT = 5051
 GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 DEEPGRAM_API_URL = "https://api.deepgram.com/v1/projects"
+SIXTYDB_VOICES_URL = "https://api.60db.ai/myvoices"
 PIPER_VOICES_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
 USER_AGENT = "translator/1.0"
 
@@ -52,6 +53,7 @@ DEFAULT_VOICES = {
 
 DEFAULT_SETTINGS = {
     "deepgram_api_key": "",
+    "sixtydb_api_key": "",
     "groq_api_key": "",
     "tts_outgoing_voice": "",
     "tts_incoming_voice": "",
@@ -62,6 +64,14 @@ DEFAULT_SETTINGS = {
     "endpointing_ms": 300,
     "my_language": "en",
     "their_language": "en",
+    # Provider selection (per direction). STT: "deepgram" | "60db". TTS: "piper" | "60db".
+    "stt_provider_outgoing": "deepgram",
+    "stt_provider_incoming": "deepgram",
+    "tts_provider_outgoing": "piper",
+    "tts_provider_incoming": "piper",
+    # 60db voice ids, used when the matching TTS provider is "60db".
+    "tts_60db_voice_outgoing": "",
+    "tts_60db_voice_incoming": "",
 }
 
 
@@ -73,8 +83,14 @@ def load_settings():
     # First launch -- pre-populate from env vars
     settings = dict(DEFAULT_SETTINGS)
     settings["deepgram_api_key"] = os.environ.get("DEEPGRAM_API_KEY", "")
+    settings["sixtydb_api_key"] = os.environ.get("SIXTYDB_API_KEY", "")
     settings["groq_api_key"] = os.environ.get("GROQ_API_KEY", "")
     return settings
+
+
+def get_sixtydb_key():
+    settings = load_settings()
+    return settings.get("sixtydb_api_key") or os.environ.get("SIXTYDB_API_KEY", "")
 
 
 def save_settings_to_file(settings):

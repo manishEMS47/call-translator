@@ -364,6 +364,7 @@
   .sp-dl-btn { font-size: 15px; color: var(--blue); border-color: var(--blue); }
   .sp-dl-btn:hover { background: var(--blue); color: #fff; }
   .sp-dl-btn.hidden { display: none; }
+  .sp-field.hidden { display: none; }
   .sp-dl-btn.loading { pointer-events: none; }
   .sp-dl-btn .dl-icon { display: flex; align-items: center; }
   .sp-dl-btn .dl-spin {

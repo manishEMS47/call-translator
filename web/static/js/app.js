@@ -499,22 +499,34 @@ function toggleSection(id) {
 function populateForm(s) {
   const dg = document.getElementById('cfg-deepgram');
   const gr = document.getElementById('cfg-groq');
+  const sdb = document.getElementById('cfg-sixtydb');
   if (dg._setRealValue) dg._setRealValue(s.deepgram_api_key || '');
   else dg.value = s.deepgram_api_key || '';
   if (gr._setRealValue) gr._setRealValue(s.groq_api_key || '');
   else gr.value = s.groq_api_key || '';
+  if (sdb._setRealValue) sdb._setRealValue(s.sixtydb_api_key || '');
+  else sdb.value = s.sixtydb_api_key || '';
   if (!s.deepgram_api_key && s._deepgram_from_env) dg.placeholder = 'Set via .env file';
   if (!s.groq_api_key && s._groq_from_env) gr.placeholder = 'Set via .env file';
+  if (!s.sixtydb_api_key && s._sixtydb_from_env) sdb.placeholder = 'Set via .env file';
   document.getElementById('cfg-my-lang').value = s.my_language || 'en';
   document.getElementById('cfg-their-lang').value = s.their_language || 'en';
   document.getElementById('cfg-endpointing').value = s.endpointing_ms || 300;
   document.getElementById('endpointing-val').textContent = (s.endpointing_ms || 300) + 'ms';
+  // Provider selectors
+  document.getElementById('cfg-stt-out').value = s.stt_provider_outgoing || 'deepgram';
+  document.getElementById('cfg-stt-in').value = s.stt_provider_incoming || 'deepgram';
+  document.getElementById('cfg-tts-out').value = s.tts_provider_outgoing || 'piper';
+  document.getElementById('cfg-tts-in').value = s.tts_provider_incoming || 'piper';
+  apply60dbProviderUI();
+  // 60db voice dropdowns are filled by load60dbVoices() (called from loadSettings)
   // Device dropdowns populated by loadDevices() using currentSettings
 }
 
 function readForm() {
   return {
     deepgram_api_key: (document.getElementById('cfg-deepgram')._getRealValue || (() => document.getElementById('cfg-deepgram').value))().trim(),
+    sixtydb_api_key: (document.getElementById('cfg-sixtydb')._getRealValue || (() => document.getElementById('cfg-sixtydb').value))().trim(),
     groq_api_key: (document.getElementById('cfg-groq')._getRealValue || (() => document.getElementById('cfg-groq').value))().trim(),
     my_language: document.getElementById('cfg-my-lang').value,
     their_language: document.getElementById('cfg-their-lang').value,
@@ -523,6 +535,12 @@ function readForm() {
     mic_device: document.getElementById('cfg-mic').value || 'default',
     speaker_device: document.getElementById('cfg-speaker').value || 'default',
     endpointing_ms: parseInt(document.getElementById('cfg-endpointing').value),
+    stt_provider_outgoing: document.getElementById('cfg-stt-out').value,
+    stt_provider_incoming: document.getElementById('cfg-stt-in').value,
+    tts_provider_outgoing: document.getElementById('cfg-tts-out').value,
+    tts_provider_incoming: document.getElementById('cfg-tts-in').value,
+    tts_60db_voice_outgoing: document.getElementById('cfg-60db-voice-out').value,
+    tts_60db_voice_incoming: document.getElementById('cfg-60db-voice-in').value,
   };
 }
 
@@ -604,8 +622,12 @@ document.getElementById('cfg-endpointing').addEventListener('input', function() 
 
 // Test API key
 async function testKey(provider) {
-  const inputId = provider === 'deepgram' ? 'cfg-deepgram' : 'cfg-groq';
-  const btnId = provider === 'deepgram' ? 'test-deepgram' : 'test-groq';
+  const ids = {
+    deepgram: { input: 'cfg-deepgram', btn: 'test-deepgram' },
+    groq:     { input: 'cfg-groq',     btn: 'test-groq' },
+    '60db':   { input: 'cfg-sixtydb',  btn: 'test-sixtydb' },
+  };
+  const { input: inputId, btn: btnId } = ids[provider] || ids.deepgram;
   const el = document.getElementById(inputId);
   const key = (el._getRealValue ? el._getRealValue() : el.value).trim();
   const btn = document.getElementById(btnId);
@@ -869,11 +891,61 @@ async function loadDevices() {
 }
 
 // Load settings from server
+// ===== 60db providers =====
+let sixtyDbVoices = [];
+
+async function load60dbVoices() {
+  try {
+    const r = await fetch('/api/60db-voices');
+    const data = await r.json();
+    sixtyDbVoices = data.voices || [];
+  } catch(e) {
+    sixtyDbVoices = [];
+    console.error('Failed to load 60db voices', e);
+  }
+  fill60dbVoiceSelect('cfg-60db-voice-out', currentSettings.tts_60db_voice_outgoing);
+  fill60dbVoiceSelect('cfg-60db-voice-in', currentSettings.tts_60db_voice_incoming);
+}
+
+function fill60dbVoiceSelect(selId, currentVal) {
+  const sel = document.getElementById(selId);
+  if (!sel) return;
+  sel.innerHTML = '';
+  if (sixtyDbVoices.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    const hasKey = currentSettings.sixtydb_api_key || currentSettings._sixtydb_from_env;
+    opt.textContent = hasKey ? 'No 60db voices found' : 'Add a 60db API key first';
+    sel.appendChild(opt);
+    return;
+  }
+  for (const v of sixtyDbVoices) {
+    const opt = document.createElement('option');
+    opt.value = v.voice_id;
+    const meta = [v.language_name || v.language, v.gender, v.accent].filter(Boolean).join(', ');
+    opt.textContent = meta ? (v.name + ' (' + meta + ')') : v.name;
+    sel.appendChild(opt);
+  }
+  if (currentVal) sel.value = currentVal;
+}
+
+// Show/hide the 60db voice dropdowns based on the TTS provider selection.
+function apply60dbProviderUI() {
+  const outIs60 = document.getElementById('cfg-tts-out').value === '60db';
+  const inIs60 = document.getElementById('cfg-tts-in').value === '60db';
+  document.getElementById('row-60db-voice-out').classList.toggle('hidden', !outIs60);
+  document.getElementById('row-60db-voice-in').classList.toggle('hidden', !inIs60);
+}
+
+document.getElementById('cfg-tts-out').addEventListener('change', apply60dbProviderUI);
+document.getElementById('cfg-tts-in').addEventListener('change', apply60dbProviderUI);
+
 async function loadSettings() {
   try {
     const r = await fetch('/api/settings');
     currentSettings = await r.json();
     populateForm(currentSettings);
+    await load60dbVoices();
   } catch(e) { console.error('Failed to load settings', e); }
 }
 

@@ -1,218 +1,95 @@
-/// Speech-to-text via Deepgram Nova-3 streaming WebSocket API.
-///
-/// Sends raw PCM audio over a persistent WebSocket connection.
-/// Deepgram handles VAD/endpointing internally and returns `speech_final`
-/// events when an utterance is complete.
+//! Speech-to-text provider abstraction.
+//!
+//! Two interchangeable streaming backends sit behind a single [`SttSession`]
+//! trait so the audio pipeline behaves identically regardless of provider:
+//!   - [`deepgram`] — Deepgram Nova-3 streaming WebSocket API.
+//!   - [`sixtydb`]  — 60db streaming WebSocket STT API.
+//!
+//! Both stream raw 16 kHz PCM up over a non-blocking WebSocket and return
+//! finalized utterances. The engine selects one per pipeline via [`SttConfig`].
 
-use std::io::ErrorKind;
-use std::time::Instant;
+mod deepgram;
+mod sixtydb;
 
-use anyhow::{bail, Context, Result};
-use log::{debug, info, warn};
-use serde::Deserialize;
-use tungstenite::client::IntoClientRequest;
+use anyhow::{Context, Result};
 use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{connect, Message, WebSocket};
+use tungstenite::WebSocket;
 
-// ---------------------------------------------------------------------------
-// DeepgramStt — config holder, creates sessions
-// ---------------------------------------------------------------------------
-
-pub struct DeepgramStt {
-    api_key: String,
-    language: String,
-    /// Milliseconds of silence before Deepgram fires speech_final (endpointing).
-    endpointing_ms: u32,
-}
-
-impl DeepgramStt {
-    pub fn new(api_key: String, language: String, endpointing_ms: u32) -> Self {
-        // Map our lang codes to Deepgram-compatible codes
-        let language = match language.as_str() {
-            "pt" => "pt-BR",
-            "no" => "nb",     // Norwegian Bokmål
-            code => code,
-        }.to_string();
-        Self { api_key, language, endpointing_ms }
-    }
-
-    /// Open a WebSocket session to Deepgram.
-    /// `sample_rate` is the rate of audio you'll send (after downsampling).
-    pub fn create_session(&self, sample_rate: u32) -> Result<DeepgramSession> {
-        let url = format!(
-            "wss://api.deepgram.com/v1/listen\
-             ?model=nova-3\
-             &language={}\
-             &encoding=linear16\
-             &sample_rate={}\
-             &channels=1\
-             &interim_results=true\
-             &endpointing={}",
-            self.language, sample_rate, self.endpointing_ms
-        );
-
-        // Build request via into_client_request() so tungstenite adds proper
-        // WebSocket handshake headers, then inject the Authorization header on top.
-        let mut request = url
-            .into_client_request()
-            .context("Failed to build Deepgram request")?;
-        request.headers_mut().insert(
-            "Authorization",
-            format!("Token {}", self.api_key)
-                .parse()
-                .context("Invalid API key header value")?,
-        );
-
-        info!(
-            "Connecting to Deepgram (lang={}, {}Hz, endpointing={}ms)...",
-            self.language, sample_rate, self.endpointing_ms
-        );
-
-        let (mut ws, _) = connect(request).context("Failed to connect to Deepgram WebSocket")?;
-
-        // Non-blocking so we can poll without blocking the audio loop.
-        set_nonblocking(&mut ws)?;
-
-        info!("Deepgram session connected");
-        Ok(DeepgramSession {
-            ws,
-            audio_sent_secs: 0.0,
-            last_send_time: Instant::now(),
-            sample_rate,
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// DeepgramSession — active WebSocket connection
-// ---------------------------------------------------------------------------
-
-pub struct DeepgramSession {
-    ws: WebSocket<MaybeTlsStream<std::net::TcpStream>>,
-    /// Total seconds of audio sent to Deepgram (accumulated from sample count + rate).
-    audio_sent_secs: f64,
-    /// Instant when the latest audio chunk was sent.
-    last_send_time: Instant,
-    /// Sample rate of audio being sent.
-    sample_rate: u32,
-}
-
-/// Transcript with STT latency info.
+/// A finalized transcript segment with measured STT latency.
 pub struct SttResult {
     pub text: String,
     /// Real STT latency: wall-clock time from utterance end to result received.
     pub stt_latency_ms: u64,
 }
 
-impl DeepgramSession {
-    /// Send audio samples (f32 mono). Converts to i16 PCM internally.
-    pub fn send_audio(&mut self, samples: &[f32]) -> Result<()> {
-        let bytes: Vec<u8> = samples
-            .iter()
-            .flat_map(|&s| {
-                let i = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                i.to_le_bytes()
-            })
-            .collect();
+/// A live streaming STT session.
+///
+/// The pipeline feeds audio with [`send_audio`](SttSession::send_audio) and
+/// drains finalized utterances with [`poll_transcript`](SttSession::poll_transcript),
+/// both non-blocking so the audio loop is never stalled.
+pub trait SttSession: Send {
+    /// Send audio samples (f32 mono, 16 kHz, [-1, 1]). Converts to i16 PCM internally.
+    fn send_audio(&mut self, samples: &[f32]) -> Result<()>;
 
-        match self.ws.send(Message::Binary(bytes)) {
-            Ok(()) => {
-                self.audio_sent_secs += samples.len() as f64 / self.sample_rate as f64;
-                self.last_send_time = Instant::now();
-                Ok(())
+    /// Poll for a finalized segment. Non-blocking — returns `Ok(None)` when no
+    /// finalized transcript is available yet.
+    fn poll_transcript(&mut self) -> Result<Option<SttResult>>;
+
+    /// Close the session cleanly.
+    fn close(&mut self);
+}
+
+/// Provider-agnostic STT configuration. Holds credentials/options and creates
+/// sessions on demand (one per pipeline direction).
+pub enum SttConfig {
+    Deepgram(deepgram::DeepgramStt),
+    SixtyDb(sixtydb::SixtyDbStt),
+}
+
+impl SttConfig {
+    /// Build an STT config for the given provider name (`"deepgram"` or `"60db"`).
+    ///
+    /// `endpointing_ms` is the silence threshold before an utterance is
+    /// finalized — passed through to each provider's equivalent setting.
+    pub fn new(provider: &str, api_key: String, language: String, endpointing_ms: u32) -> Self {
+        match provider {
+            "60db" | "sixtydb" => {
+                SttConfig::SixtyDb(sixtydb::SixtyDbStt::new(api_key, language, endpointing_ms))
             }
-            Err(tungstenite::Error::Io(e)) if e.kind() == ErrorKind::WouldBlock => {
-                // Non-blocking socket buffer full — drop this chunk silently
-                Ok(())
-            }
-            Err(e) => Err(anyhow::anyhow!("Failed to send audio to Deepgram: {}", e)),
+            _ => SttConfig::Deepgram(deepgram::DeepgramStt::new(api_key, language, endpointing_ms)),
         }
     }
 
-    /// Poll for a finalized segment (is_final=true).
-    /// Non-blocking — returns None immediately if no data is available.
-    /// Uses is_final instead of speech_final for lower latency — no endpointing wait.
-    pub fn poll_transcript(&mut self) -> Result<Option<SttResult>> {
-        loop {
-            match self.ws.read() {
-                Ok(Message::Text(text)) => {
-                    debug!("Deepgram: {}", &text[..text.len().min(200)]);
-                    match serde_json::from_str::<DgResponse>(&text) {
-                        Ok(resp) if resp.is_final == Some(true) => {
-                            let transcript = resp
-                                .channel
-                                .and_then(|c| c.alternatives.into_iter().next())
-                                .map(|a| a.transcript)
-                                .unwrap_or_default();
-
-                            if !transcript.trim().is_empty() {
-                                // STT latency: how far behind real-time is Deepgram?
-                                // audio_sent_secs = total audio duration sent
-                                // utterance_end = start + duration (Deepgram's clock)
-                                // The gap = (audio_sent - utterance_end) seconds of audio
-                                //   that Deepgram still had buffered when it returned this result.
-                                // Plus the network RTT from last send to now.
-                                // Simplified: time since last audio send + processing backlog
-                                let utterance_end_secs = resp.start.unwrap_or(0.0)
-                                    + resp.duration.unwrap_or(0.0);
-                                let backlog_secs = self.audio_sent_secs - utterance_end_secs;
-                                let since_last_send_ms = self.last_send_time.elapsed().as_millis() as u64;
-                                let stt_latency_ms = (backlog_secs * 1000.0).max(0.0) as u64
-                                    + since_last_send_ms;
-
-                                info!("Deepgram is_final: '{}' (stt={}ms)", transcript, stt_latency_ms);
-                                return Ok(Some(SttResult {
-                                    text: transcript,
-                                    stt_latency_ms,
-                                }));
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => debug!("Deepgram parse error: {}", e),
-                    }
-                }
-                Ok(_) => {}
-                Err(tungstenite::Error::Io(e)) if e.kind() == ErrorKind::WouldBlock => {
-                    return Ok(None);
-                }
-                Err(e) => bail!("Deepgram WebSocket error: {}", e),
-            }
+    /// Open a streaming session. `sample_rate` is the rate of audio you'll send.
+    pub fn create_session(&self, sample_rate: u32) -> Result<Box<dyn SttSession>> {
+        match self {
+            SttConfig::Deepgram(s) => Ok(Box::new(s.create_session(sample_rate)?)),
+            SttConfig::SixtyDb(s) => Ok(Box::new(s.create_session(sample_rate)?)),
         }
     }
-
-    pub fn close(&mut self) {
-        let _ = self.ws.send(Message::Binary(vec![]));
-        let _ = self.ws.close(None);
-    }
 }
 
 // ---------------------------------------------------------------------------
-// Deepgram response types
+// Shared helpers
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
-struct DgResponse {
-    is_final: Option<bool>,
-    start: Option<f64>,
-    duration: Option<f64>,
-    channel: Option<DgChannel>,
+/// Convert mono f32 samples ([-1, 1]) to little-endian i16 PCM bytes.
+pub(crate) fn f32_to_pcm16_le(samples: &[f32]) -> Vec<u8> {
+    samples
+        .iter()
+        .flat_map(|&s| {
+            let i = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+            i.to_le_bytes()
+        })
+        .collect()
 }
 
-#[derive(Deserialize)]
-struct DgChannel {
-    alternatives: Vec<DgAlternative>,
-}
-
-#[derive(Deserialize)]
-struct DgAlternative {
-    transcript: String,
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn set_nonblocking(ws: &mut WebSocket<MaybeTlsStream<std::net::TcpStream>>) -> Result<()> {
+/// Put the underlying TCP socket into non-blocking mode so reads/writes never
+/// stall the audio loop.
+pub(crate) fn set_nonblocking(
+    ws: &mut WebSocket<MaybeTlsStream<std::net::TcpStream>>,
+) -> Result<()> {
+    use log::warn;
     match ws.get_mut() {
         MaybeTlsStream::Plain(s) => s.set_nonblocking(true).context("set_nonblocking (plain)")?,
         MaybeTlsStream::NativeTls(s) => s

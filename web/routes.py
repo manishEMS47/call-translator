@@ -11,10 +11,10 @@ import urllib.error
 from flask import Response, render_template, request, jsonify
 
 from .settings import (
-    GROQ_MODEL, GROQ_CHAT_URL, DEEPGRAM_API_URL, USER_AGENT,
+    GROQ_MODEL, GROQ_CHAT_URL, DEEPGRAM_API_URL, SIXTYDB_VOICES_URL, USER_AGENT,
     CMD_HOST, CMD_PORT, MODELS_DIR, LOG_FILE,
     DEFAULT_VOICES,
-    load_settings, save_settings_to_file, get_groq_key,
+    load_settings, save_settings_to_file, get_groq_key, get_sixtydb_key,
 )
 from .db import _get_db, _ensure_call, _close_call, _record_line, _call_lock
 from .helpers import (
@@ -48,8 +48,10 @@ def register_routes(app):
         settings = load_settings()
         # Mark keys that come from env vars (not saved in settings.json)
         env_deepgram = os.environ.get("DEEPGRAM_API_KEY", "")
+        env_sixtydb = os.environ.get("SIXTYDB_API_KEY", "")
         env_groq = os.environ.get("GROQ_API_KEY", "")
         settings["_deepgram_from_env"] = bool(env_deepgram and not settings.get("deepgram_api_key"))
+        settings["_sixtydb_from_env"] = bool(env_sixtydb and not settings.get("sixtydb_api_key"))
         settings["_groq_from_env"] = bool(env_groq and not settings.get("groq_api_key"))
         return jsonify(settings)
 
@@ -76,6 +78,22 @@ def register_routes(app):
                     headers={"Authorization": f"Token {key}", "User-Agent": USER_AGENT},
                 )
                 urllib.request.urlopen(req, timeout=5)
+                return jsonify({"valid": True})
+            except Exception as e:
+                return jsonify({"valid": False, "error": str(e)})
+
+        elif provider == "60db":
+            try:
+                req = urllib.request.Request(
+                    SIXTYDB_VOICES_URL,
+                    headers={"Authorization": f"Bearer {key}", "User-Agent": USER_AGENT},
+                )
+                urllib.request.urlopen(req, timeout=10)
+                return jsonify({"valid": True})
+            except urllib.error.HTTPError as e:
+                if e.code in (401, 403):
+                    return jsonify({"valid": False, "error": "Invalid API key"})
+                # Other HTTP errors (rate limit etc.) = key accepted
                 return jsonify({"valid": True})
             except Exception as e:
                 return jsonify({"valid": False, "error": str(e)})
@@ -134,6 +152,37 @@ def register_routes(app):
                 })
             result[lang] = sorted(voice_list, key=lambda x: x["name"])
         return jsonify(result)
+
+    @app.route("/api/60db-voices")
+    def api_60db_voices():
+        """Proxy 60db's /myvoices so the UI can populate voice dropdowns."""
+        key = get_sixtydb_key()
+        if not key:
+            return jsonify({"voices": [], "error": "no 60db key"}), 200
+        try:
+            req = urllib.request.Request(
+                SIXTYDB_VOICES_URL,
+                headers={"Authorization": f"Bearer {key}", "User-Agent": USER_AGENT},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                payload = json.loads(resp.read().decode())
+            voices = []
+            for v in payload.get("data", []):
+                labels = v.get("labels", {}) or {}
+                voices.append({
+                    "voice_id": v.get("voice_id", ""),
+                    "name": v.get("name", ""),
+                    "model": v.get("model", ""),
+                    "language": labels.get("language", ""),
+                    "language_name": labels.get("language_name", ""),
+                    "gender": labels.get("gender", ""),
+                    "accent": labels.get("accent", ""),
+                })
+            return jsonify({"voices": voices})
+        except urllib.error.HTTPError as e:
+            return jsonify({"voices": [], "error": f"HTTP {e.code}"}), 200
+        except Exception as e:
+            return jsonify({"voices": [], "error": str(e)}), 200
 
     @app.route("/api/devices")
     def api_devices():

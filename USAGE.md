@@ -6,11 +6,14 @@ Open **http://127.0.0.1:5050** after running `./run.sh`.
 
 Settings open automatically on first launch. Fill in:
 
-1. **API Keys** — enter your [Deepgram](https://console.deepgram.com) and [Groq](https://console.groq.com) keys, click **Test** to verify
+1. **API Keys** — enter your [Deepgram](https://console.deepgram.com) and [Groq](https://console.groq.com) keys, click **Test** to verify. Optionally add a [60db](https://60db.ai) key to use 60db for STT and/or TTS
 2. **Languages** — set "My Language" (what you speak) and "Their Language" (what the other person speaks)
-3. **Voice** — pick a TTS voice for each language. One default voice is pre-installed; download more from the dropdown
-4. **Audio Devices** — select your mic and speakers. BlackHole devices are configured automatically
-5. Click **Save & Restart Engine**
+3. **Providers** — choose the STT and TTS provider for each direction. STT: Deepgram or 60db. TTS: Piper (local) or 60db. When you pick 60db for TTS, select a 60db voice from the dropdown (loaded from your 60db account)
+4. **Voice** — for Piper TTS, pick a local voice per language. One default voice is pre-installed; download more from the dropdown
+5. **Audio Devices** — select your mic and speakers. BlackHole devices are configured automatically
+6. Click **Save & Restart Engine**
+
+> **Providers are per-direction.** You can, for example, keep Deepgram STT for both sides but switch the incoming TTS to a 60db voice — the pipeline behaves identically regardless of which provider you choose.
 
 ## Controls
 

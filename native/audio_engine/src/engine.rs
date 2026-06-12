@@ -17,9 +17,9 @@ use crate::audio;
 use crate::audio::capture::{AudioCapture, AudioChunk};
 use crate::audio::playback::AudioPlayback;
 use crate::protocol::Event;
-use crate::stt::DeepgramStt;
+use crate::stt::{SttConfig, SttSession};
 use crate::translation::{TranslationDirection, TranslationEngine};
-use crate::tts::TtsEngine;
+use crate::tts::{SixtyDbTts, TtsEngine, TtsSynthesizer};
 
 // ---------------------------------------------------------------------------
 // EngineConfig
@@ -27,6 +27,7 @@ use crate::tts::TtsEngine;
 
 pub struct EngineConfig {
     pub deepgram_api_key: String,
+    pub sixtydb_api_key: String,
     pub groq_api_key: String,
     pub tts_en_model: String,
     pub tts_en_config: String,
@@ -40,6 +41,15 @@ pub struct EngineConfig {
     pub endpointing_ms: u32,
     pub my_language: String,
     pub their_language: String,
+    /// STT provider per direction: "deepgram" or "60db".
+    pub stt_provider_out: String,
+    pub stt_provider_in: String,
+    /// TTS provider per direction: "piper" or "60db".
+    pub tts_provider_out: String,
+    pub tts_provider_in: String,
+    /// 60db voice ids (used when the corresponding TTS provider is "60db").
+    pub tts_60db_voice_out: String,
+    pub tts_60db_voice_in: String,
 }
 
 impl EngineConfig {
@@ -48,6 +58,7 @@ impl EngineConfig {
 
         Self {
             deepgram_api_key: std::env::var("DEEPGRAM_API_KEY").unwrap_or_default(),
+            sixtydb_api_key: std::env::var("SIXTYDB_API_KEY").unwrap_or_default(),
             groq_api_key: std::env::var("GROQ_API_KEY").unwrap_or_default(),
             tts_en_model: std::env::var("TRANSLATOR_TTS_EN_MODEL")
                 .unwrap_or_else(|_| format!("{}/piper-en/en_US-ryan-medium.onnx", base)),
@@ -75,6 +86,16 @@ impl EngineConfig {
                 .unwrap_or(300),
             my_language: std::env::var("TRANSLATOR_MY_LANG").unwrap_or_else(|_| "ru".into()),
             their_language: std::env::var("TRANSLATOR_THEIR_LANG").unwrap_or_else(|_| "en".into()),
+            stt_provider_out: std::env::var("TRANSLATOR_STT_PROVIDER_OUT")
+                .unwrap_or_else(|_| "deepgram".into()),
+            stt_provider_in: std::env::var("TRANSLATOR_STT_PROVIDER_IN")
+                .unwrap_or_else(|_| "deepgram".into()),
+            tts_provider_out: std::env::var("TRANSLATOR_TTS_PROVIDER_OUT")
+                .unwrap_or_else(|_| "piper".into()),
+            tts_provider_in: std::env::var("TRANSLATOR_TTS_PROVIDER_IN")
+                .unwrap_or_else(|_| "piper".into()),
+            tts_60db_voice_out: std::env::var("TRANSLATOR_TTS_60DB_VOICE_OUT").unwrap_or_default(),
+            tts_60db_voice_in: std::env::var("TRANSLATOR_TTS_60DB_VOICE_IN").unwrap_or_default(),
         }
     }
 }
@@ -134,10 +155,8 @@ impl Engine {
                     info!("Could not enumerate audio devices: {:#}", e);
                 }
 
-                if self.config.deepgram_api_key.is_empty() {
-                    return vec![Event::Error {
-                        message: "DEEPGRAM_API_KEY is not set".into(),
-                    }];
+                if let Err(msg) = self.validate_keys(&pipelines) {
+                    return vec![Event::Error { message: msg }];
                 }
 
                 match self.start_pipelines(&pipelines) {
@@ -278,6 +297,47 @@ impl Engine {
         }
     }
 
+    /// Verify the API keys required by the selected providers are present
+    /// before we try to start any pipeline. Returns an error message to surface
+    /// to the UI when a needed key is missing.
+    fn validate_keys(&self, pipelines: &[String]) -> std::result::Result<(), String> {
+        let c = &self.config;
+        let mut needs_deepgram = false;
+        let mut needs_sixtydb = false;
+
+        for p in pipelines {
+            let (stt_provider, tts_provider) = match p.as_str() {
+                "outgoing" => (&c.stt_provider_out, &c.tts_provider_out),
+                "incoming" => (&c.stt_provider_in, &c.tts_provider_in),
+                _ => continue,
+            };
+            match stt_provider.as_str() {
+                "60db" | "sixtydb" => needs_sixtydb = true,
+                _ => needs_deepgram = true,
+            }
+            if matches!(tts_provider.as_str(), "60db" | "sixtydb") {
+                needs_sixtydb = true;
+            }
+        }
+
+        if needs_deepgram && c.deepgram_api_key.is_empty() {
+            return Err("DEEPGRAM_API_KEY is not set".into());
+        }
+        if needs_sixtydb && c.sixtydb_api_key.is_empty() {
+            return Err("SIXTYDB_API_KEY is not set (required for the selected 60db provider)".into());
+        }
+        Ok(())
+    }
+
+    /// Build the STT config for a direction from its provider + language.
+    fn stt_for(&self, provider: &str, language: &str) -> SttConfig {
+        let key = match provider {
+            "60db" | "sixtydb" => self.config.sixtydb_api_key.clone(),
+            _ => self.config.deepgram_api_key.clone(),
+        };
+        SttConfig::new(provider, key, language.to_string(), self.config.endpointing_ms)
+    }
+
     fn start_pipelines(&mut self, pipelines: &[String]) -> Result<()> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         self.stop_flag = Some(stop_flag.clone());
@@ -288,35 +348,22 @@ impl Engine {
                 .context("Failed to initialize translation engine")?,
         );
 
-        info!("Loading TTS models...");
-        let mut tts_out = Some(
-            TtsEngine::new(
-                &self.config.tts_en_config,
-                &self.config.tts_en_model,
-                self.config.sample_rate,
-            )
-            .context("Failed to load TTS engine (outgoing/en)")?,
-        );
-        let mut tts_in = Some(
-            TtsEngine::new(
-                &self.config.tts_ru_config,
-                &self.config.tts_ru_model,
-                self.config.sample_rate,
-            )
-            .context("Failed to load TTS engine (incoming/ru)")?,
-        );
-
-        info!("All models loaded, spawning pipelines...");
+        info!("Loading STT/TTS providers, spawning pipelines...");
 
         for pipeline_name in pipelines {
             match pipeline_name.as_str() {
                 "outgoing" => {
-                    let tts = tts_out.take().expect("outgoing TTS already taken");
-                    let stt = DeepgramStt::new(
-                        self.config.deepgram_api_key.clone(),
-                        self.config.my_language.clone(),
-                        self.config.endpointing_ms,
-                    );
+                    // OUTGOING: my speech -> their language out.
+                    let stt = self.stt_for(&self.config.stt_provider_out, &self.config.my_language);
+                    let tts = build_tts(
+                        &self.config.tts_provider_out,
+                        &self.config.tts_en_config,
+                        &self.config.tts_en_model,
+                        &self.config.sixtydb_api_key,
+                        &self.config.tts_60db_voice_out,
+                        self.config.sample_rate,
+                    )
+                    .context("Failed to load TTS provider (outgoing)")?;
                     let handle = spawn_pipeline(
                         "outgoing",
                         self.config.mic_device.clone(),
@@ -334,12 +381,17 @@ impl Engine {
                     self.pipeline_handles.push(handle);
                 }
                 "incoming" => {
-                    let tts = tts_in.take().expect("incoming TTS already taken");
-                    let stt = DeepgramStt::new(
-                        self.config.deepgram_api_key.clone(),
-                        self.config.their_language.clone(),
-                        self.config.endpointing_ms,
-                    );
+                    // INCOMING: their speech -> my language out.
+                    let stt = self.stt_for(&self.config.stt_provider_in, &self.config.their_language);
+                    let tts = build_tts(
+                        &self.config.tts_provider_in,
+                        &self.config.tts_ru_config,
+                        &self.config.tts_ru_model,
+                        &self.config.sixtydb_api_key,
+                        &self.config.tts_60db_voice_in,
+                        self.config.sample_rate,
+                    )
+                    .context("Failed to load TTS provider (incoming)")?;
                     let handle = spawn_pipeline(
                         "incoming",
                         self.config.meet_input_device.clone(),
@@ -383,17 +435,42 @@ impl Engine {
 // Pipeline spawning
 // ---------------------------------------------------------------------------
 
+/// Construct a TTS synthesizer for the given provider.
+///
+/// `piper_config`/`piper_model` are used for the local Piper backend;
+/// `sixtydb_key`/`sixtydb_voice` for the 60db backend. Both return audio at
+/// `sample_rate`, so the pipeline is provider-agnostic downstream.
+fn build_tts(
+    provider: &str,
+    piper_config: &str,
+    piper_model: &str,
+    sixtydb_key: &str,
+    sixtydb_voice: &str,
+    sample_rate: u32,
+) -> Result<Box<dyn TtsSynthesizer>> {
+    match provider {
+        "60db" | "sixtydb" => {
+            let tts = SixtyDbTts::new(sixtydb_key.to_string(), sixtydb_voice.to_string(), sample_rate)?;
+            Ok(Box::new(tts))
+        }
+        _ => {
+            let tts = TtsEngine::new(piper_config, piper_model, sample_rate)?;
+            Ok(Box::new(tts))
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_pipeline(
     direction: &str,
     capture_device: String,
     playback_device: String,
     sample_rate: u32,
-    stt: DeepgramStt,
+    stt: SttConfig,
     translator: Arc<TranslationEngine>,
     translate_direction: TranslationDirection,
     source_lang: &str,
-    tts: TtsEngine,
+    tts: Box<dyn TtsSynthesizer>,
     event_tx: Sender<Event>,
     stop_flag: Arc<AtomicBool>,
     mute_flag: Arc<AtomicBool>,
@@ -440,11 +517,11 @@ fn run_pipeline(
     capture_device: &str,
     playback_device: &str,
     sample_rate: u32,
-    stt: DeepgramStt,
+    stt: SttConfig,
     translator: &TranslationEngine,
     translate_direction: TranslationDirection,
     source_lang: &str,
-    mut tts: TtsEngine,
+    mut tts: Box<dyn TtsSynthesizer>,
     event_tx: &Sender<Event>,
     stop_flag: &AtomicBool,
     mute_flag: &AtomicBool,
@@ -466,11 +543,11 @@ fn run_pipeline(
     let playback = AudioPlayback::new(playback_device, sample_rate, playback_rx)
         .with_context(|| format!("[{}] Failed to create AudioPlayback", direction))?;
 
-    // Connect to Deepgram — stream at 16kHz to save bandwidth
+    // Connect to the STT provider — stream at 16kHz to save bandwidth
     let stt_sample_rate = 16_000_u32;
     let mut session = stt
         .create_session(stt_sample_rate)
-        .with_context(|| format!("[{}] Failed to connect to Deepgram", direction))?;
+        .with_context(|| format!("[{}] Failed to connect to STT provider", direction))?;
 
     capture
         .start()
@@ -505,7 +582,7 @@ fn run_pipeline(
                 &proc_translator,
                 &translate_direction,
                 &proc_source_lang,
-                &mut tts,
+                &mut *tts,
                 proc_sample_rate,
                 &proc_playback_tx,
                 &proc_event_tx,
@@ -528,7 +605,7 @@ fn run_pipeline(
                 }
                 let samples_16k = resample(&chunk.samples, capture_rate, stt_sample_rate);
                 if let Err(e) = session.send_audio(&samples_16k) {
-                    warn!("[{}] Deepgram send error: {:#}", direction, e);
+                    warn!("[{}] STT send error: {:#}", direction, e);
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
@@ -551,9 +628,9 @@ fn run_pipeline(
             }
             Ok(None) => {}
             Err(e) => {
-                error!("[{}] Deepgram error: {:#}", direction, e);
+                error!("[{}] STT error: {:#}", direction, e);
                 let _ = event_tx.send(Event::Error {
-                    message: format!("[{}] Deepgram error: {:#}", direction, e),
+                    message: format!("[{}] STT error: {:#}", direction, e),
                 });
                 break;
             }
@@ -581,7 +658,7 @@ fn process_utterance(
     translator: &TranslationEngine,
     translate_direction: &TranslationDirection,
     source_lang: &str,
-    tts: &mut TtsEngine,
+    tts: &mut dyn TtsSynthesizer,
     sample_rate: u32,
     playback_tx: &Sender<Vec<f32>>,
     event_tx: &Sender<Event>,

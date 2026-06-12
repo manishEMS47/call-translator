@@ -42,6 +42,14 @@
           <div class="sp-hint">Used for speech-to-text. Get a key at console.deepgram.com</div>
         </div>
         <div class="sp-field">
+          <div class="sp-label">60db API Key <span class="badge">STT/TTS</span></div>
+          <div class="sp-input-row">
+            <input class="sp-input sp-key" id="cfg-sixtydb" type="text" placeholder="Enter 60db key..." autocomplete="one-time-code" spellcheck="false" data-lpignore="true" data-1p-ignore="true" data-form-type="other">
+            <button class="sp-test-btn" id="test-sixtydb" onclick="testKey('60db')">Test</button>
+          </div>
+          <div class="sp-hint">Optional. Required only when a 60db STT/TTS provider is selected below. Get a key at 60db.ai</div>
+        </div>
+        <div class="sp-field">
           <div class="sp-label">Groq API Key <span class="badge">Translation</span></div>
           <div class="sp-input-row">
             <input class="sp-input sp-key" id="cfg-groq" type="text" placeholder="Enter Groq key..." autocomplete="one-time-code" spellcheck="false" data-lpignore="true" data-1p-ignore="true" data-form-type="other">
@@ -124,6 +132,53 @@
           </select>
           <div class="sp-hint">Select a language, then download additional voices from the Voice section below.</div>
         </div>
+      </div>
+    </div>
+
+    <!-- Providers -->
+    <div class="sp-section" id="sec-providers">
+      <div class="sp-section-head" onclick="toggleSection('sec-providers')">
+        <span>Providers</span>
+        <span class="chev">&#9662;</span>
+      </div>
+      <div class="sp-section-body">
+        <div class="sp-field">
+          <div class="sp-label">STT — My speech <span class="badge">outgoing</span></div>
+          <select class="sp-input" id="cfg-stt-out">
+            <option value="deepgram">Deepgram</option>
+            <option value="60db">60db</option>
+          </select>
+        </div>
+        <div class="sp-field">
+          <div class="sp-label">STT — Their speech <span class="badge">incoming</span></div>
+          <select class="sp-input" id="cfg-stt-in">
+            <option value="deepgram">Deepgram</option>
+            <option value="60db">60db</option>
+          </select>
+        </div>
+        <div class="sp-field">
+          <div class="sp-label">TTS — They hear <span class="badge">outgoing</span></div>
+          <select class="sp-input" id="cfg-tts-out">
+            <option value="piper">Piper (local)</option>
+            <option value="60db">60db</option>
+          </select>
+        </div>
+        <div class="sp-field hidden" id="row-60db-voice-out">
+          <div class="sp-label">60db Voice (they hear)</div>
+          <select class="sp-input" id="cfg-60db-voice-out"></select>
+        </div>
+        <div class="sp-field">
+          <div class="sp-label">TTS — I hear <span class="badge">incoming</span></div>
+          <select class="sp-input" id="cfg-tts-in">
+            <option value="piper">Piper (local)</option>
+            <option value="60db">60db</option>
+          </select>
+        </div>
+        <div class="sp-field hidden" id="row-60db-voice-in">
+          <div class="sp-label">60db Voice (I hear)</div>
+          <select class="sp-input" id="cfg-60db-voice-in"></select>
+        </div>
+        <div class="sp-hint">Piper uses local downloaded voices (Voice section below). 60db uses your cloud voices and needs a 60db API key.</div>
       </div>
     </div>
 

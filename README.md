@@ -8,6 +8,8 @@ Real-time speech translator for video/voice calls. Translates both sides of the 
 
 Supports **29 languages** with STT, translation, and TTS. Voice models from [Piper](https://github.com/rhasspy/piper) — download any language directly from the web UI.
 
+**Pluggable providers:** Speech-to-text can run on **Deepgram** or **60db**, and text-to-speech on local **Piper** or **60db** — selectable per direction (outgoing/incoming) from the web UI Settings. Mix and match freely; the pipeline behaves identically regardless of provider.
+
 ![macOS](https://img.shields.io/badge/platform-macOS_14+-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![GitHub stars](https://img.shields.io/github/stars/LetovKai/call-translator)
@@ -43,25 +45,29 @@ Open **http://127.0.0.1:5050** in **Google Chrome**. Settings open automatically
 > You need two free API keys (free tiers available):
 > - [Deepgram](https://console.deepgram.com) — speech-to-text
 > - [Groq](https://console.groq.com) — translation (LLM)
+>
+> Optionally add a [60db](https://60db.ai) key to use 60db for speech-to-text and/or text-to-speech instead.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌───────────┐     ┌─────────┐
-│  Your Mic   │────>│ Deepgram STT │────>│ Groq LLM  │────>│ Piper   │──> Call
-│  (your lang)│     │  (speech→text)│     │ (translate)│     │  TTS    │   (BlackHole)
-└─────────────┘     └──────────────┘     └───────────┘     └─────────┘
+┌─────────────┐     ┌──────────────────┐     ┌───────────┐     ┌──────────────┐
+│  Your Mic   │────>│ STT              │────>│ Groq LLM  │────>│ TTS          │──> Call
+│  (your lang)│     │ Deepgram / 60db  │     │ (translate)│     │ Piper / 60db │   (BlackHole)
+└─────────────┘     └──────────────────┘     └───────────┘     └──────────────┘
 
-┌─────────────┐     ┌──────────────┐     ┌───────────┐     ┌─────────┐
-│  Call Audio  │────>│ Deepgram STT │────>│ Groq LLM  │────>│ Piper   │──> Speakers
-│ (their lang)│     │  (speech→text)│     │ (translate)│     │  TTS    │
-└─────────────┘     └──────────────┘     └───────────┘     └─────────┘
+┌─────────────┐     ┌──────────────────┐     ┌───────────┐     ┌──────────────┐
+│  Call Audio  │────>│ STT              │────>│ Groq LLM  │────>│ TTS          │──> Speakers
+│ (their lang)│     │ Deepgram / 60db  │     │ (translate)│     │ Piper / 60db │
+└─────────────┘     └──────────────────┘     └───────────┘     └──────────────┘
 ```
 
+The STT and TTS provider for each direction is chosen in Settings. Both STT backends stream raw 16 kHz PCM over a WebSocket; both TTS backends return audio at the pipeline rate — so the providers are interchangeable behind a single interface.
+
 - **Elixir** — orchestrator, process supervision, port management
-- **Rust** — audio capture/playback, STT streaming, TTS synthesis, translation
+- **Rust** — audio capture/playback, STT streaming (Deepgram / 60db), TTS synthesis (Piper / 60db), translation
 - **Flask** — web UI for live transcript, settings, and controls
 
 ---
@@ -84,6 +90,7 @@ Open **http://127.0.0.1:5050** in **Google Chrome**. Settings open automatically
 **API Keys (free tiers available):**
 - [Deepgram](https://console.deepgram.com) — speech-to-text (Nova-3 model)
 - [Groq](https://console.groq.com) — translation via llama-3.3-70b
+- [60db](https://60db.ai) — *optional*, alternative speech-to-text and/or text-to-speech provider (selectable per direction in Settings)
 
 ---
 
@@ -155,8 +162,12 @@ Edit `.env`:
 ```
 DEEPGRAM_API_KEY=your_key_here
 GROQ_API_KEY=your_key_here
+# Optional — only needed if you select a 60db STT or TTS provider in Settings
+SIXTYDB_API_KEY=your_key_here
 ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib
 ```
+
+> API keys can also be entered (and tested) directly in the web UI Settings — `.env` is just a convenience for pre-filling them.
 
 ### 5. Build
 
@@ -179,7 +190,8 @@ Open **http://127.0.0.1:5050** in Chrome.
 
 - **Live transcript** — chat-style bubbles with original text and translation
 - **29 languages** — switch language pair from Settings, download voices with one click
-- **Voice selection** — multiple voices per language with preview playback
+- **Provider selection** — choose Deepgram or 60db for STT, and Piper or 60db for TTS, independently per direction
+- **Voice selection** — multiple Piper voices per language with preview playback; 60db voices loaded from your account
 - **Audio monitor** — hear translations in your browser (Chrome only)
 - **Start/Stop** — control the engine without restarting
 - **Mute** — independently mute outgoing or incoming pipelines
